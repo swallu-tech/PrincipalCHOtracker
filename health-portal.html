@@ -1,0 +1,232 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>District Health Tracker</title>
+<!-- Single-file app: front end + built-in back end. Data is stored in this browser (localStorage). -->
+<style>
+*{box-sizing:border-box}body{margin:0;font-family:system-ui,sans-serif;background:#f3f6f4;color:#1b2a22}
+header{background:#0b6b3a;color:#fff;display:flex;flex-wrap:wrap;align-items:center;gap:8px;padding:0 14px}
+header h1{font-size:18px;margin:12px 16px 12px 0}
+nav{display:flex;flex-wrap:wrap;gap:4px;flex:1}
+.dd{position:relative}.dd>button,nav>button,.tabs button,.btn{background:none;border:0;color:inherit;font:inherit;padding:12px;cursor:pointer}
+.menu{display:none;position:absolute;left:0;top:100%;background:#fff;color:#1b2a22;min-width:210px;max-height:70vh;overflow:auto;box-shadow:0 6px 18px #0003;z-index:20;border-radius:6px}
+.dd:hover>.menu,.dd.open>.menu{display:block}
+.menu div,.menu .dd>button{padding:9px 14px;cursor:pointer;display:block;width:100%;text-align:left;color:#1b2a22}
+.menu div:hover,.menu .dd>button:hover{background:#e3f2e9}
+.menu .dd>.menu{left:100%;top:0}
+main{max-width:960px;margin:18px auto;padding:0 14px}
+.card{background:#fff;border-radius:10px;padding:18px;margin-bottom:16px;box-shadow:0 1px 4px #0001}
+.tabs{display:flex;flex-wrap:wrap;gap:6px;margin-bottom:14px}
+.tabs button{background:#dfeee5;border-radius:20px;padding:8px 14px;color:#0b6b3a}
+.tabs button.on{background:#0b6b3a;color:#fff}
+label{display:block;font-weight:600;margin:10px 0 4px}
+input,select,textarea{width:100%;padding:9px;border:1px solid #b9c7be;border-radius:6px;font:inherit}
+.row{display:flex;gap:10px}.row>*{flex:1}
+.btn{background:#0b6b3a;color:#fff;border-radius:6px;padding:10px 18px;margin-top:12px}
+.btn.alt{background:#e3f2e9;color:#0b6b3a}.btn.red{background:#b3261e}
+table{width:100%;border-collapse:collapse;font-size:14px}th,td{text-align:left;padding:8px;border-bottom:1px solid #e1e8e3;vertical-align:top}
+.msg{padding:10px;border-radius:6px;margin-top:10px;background:#e3f2e9}.msg.err{background:#fde7e5;color:#b3261e}
+.badge{font-size:12px;background:#fff3cd;padding:2px 8px;border-radius:10px}
+img.th{max-width:120px;border-radius:6px;display:block;margin-top:6px}
+pre{white-space:pre-wrap;margin:0;font:inherit}
+.small{font-size:13px;color:#566}
+</style>
+</head>
+<body>
+<header>
+  <h1>District Health Tracker</h1>
+  <nav id="nav"></nav>
+  <span id="who" class="small" style="color:#cfe"></span>
+</header>
+<main id="app"></main>
+
+<script>
+const DISTRICTS=["Karene","Kambia","Port Loko","Bombali","Falaba","Koinadugu","Tonkolili","Kailahun","Kenema","Kono","Bo","Bonthe","Moyamba","Pujehun","Western Area Rural","Western Area Urban"];
+const CHIEFDOMS=["Barri","Gallines","Kabondeh","Kpaka","Kpanga","Kpanga Krim","Makpele","Malen","Mano Sakrim","Peje","Perri","Soro Gbema","Sowa","Yakemoh Kpukumu Krim"].map(c=>c+" Chiefdom");
+const CATS=["Outreach","FMC Data Action","PHU Staff Meetings","CHWs Meetings","Tracer Drugs","End of Month Cleaning"];
+const MONTHS=["January","February","March","April","May","June","July","August","September","October","November","December"];
+const $=s=>document.querySelector(s), app=$('#app');
+let S={token:localStorage.token||'',user:JSON.parse(localStorage.user||'null'),loc:null,cat:CATS[0],adminTab:'users',msg:''};
+const esc=s=>String(s??'').replace(/[&<>"]/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c]));
+const isAdmin=()=>S.user&&['admin','chief_admin'].includes(S.user.role);
+const queue=()=>JSON.parse(localStorage.q||'[]'), setQueue=q=>localStorage.q=JSON.stringify(q);
+
+/* ---------- BUILT-IN BACKEND (runs in the browser, data saved in localStorage) ---------- */
+const uid=()=>Date.now().toString(36)+Math.random().toString(36).slice(2,7);
+async function H(p){try{const b=await crypto.subtle.digest('SHA-256',new TextEncoder().encode('hp::'+p));return [...new Uint8Array(b)].map(x=>x.toString(16).padStart(2,'0')).join('')}catch{let h=0;for(const c of 'hp::'+p)h=(h*31+c.charCodeAt(0))|0;return 'f'+h}}
+function putDB(d){try{localStorage.hp_db=JSON.stringify(d)}catch{throw Object.assign(new Error('Browser storage is full. Remove old photos/records.'),{status:507})}}
+async function getDB(){let d=JSON.parse(localStorage.hp_db||'null');
+  if(!d){d={users:[],records:[]};
+    d.users.push({id:uid(),name:'Administrator',username:'admin',password:await H('Admin@12345'),role:'chief_admin',district:'All'});putDB(d);}
+  const ca=d.users.find(u=>u.username==='chief_admin'),ad=d.users.find(u=>u.username==='admin');
+  if(ca&&ad&&ca.password===await H('Chief@12345')){d.users=d.users.filter(u=>u!==ca);ad.role='chief_admin';putDB(d);}
+  return d;}
+const pubU=u=>{const{password,...r}=u;return r};
+const fail=(m,s=400)=>{throw Object.assign(new Error(m),{status:s})};
+async function api(path,method='GET',body){
+  try{
+  const d=await getDB(),[p,qs]=path.split('?'),q=new URLSearchParams(qs||''),b=body||{};
+  const me=d.users.find(u=>u.id===S.token),adm=me&&['admin','chief_admin'].includes(me.role);
+  const dupe=n=>d.users.some(u=>u.username.toLowerCase()===String(n).toLowerCase());
+  if(p==='/login'&&method==='POST'){
+    const u=d.users.find(x=>x.username.toLowerCase()===(b.username||'').toLowerCase());
+    if(!u||u.password!==await H(b.password||''))fail('Wrong username or password',401);
+    return{token:u.id,user:pubU(u)};}
+  if(!me)fail('Please log in',401);
+  if(p==='/password'&&method==='POST'){
+    if(me.password!==await H(b.oldPassword||''))fail('Current password is wrong');
+    if((b.newPassword||'').length<6)fail('New password must be 6+ characters');
+    me.password=await H(b.newPassword);putDB(d);return{ok:true};}
+  if(p==='/records'&&method==='POST'){
+    const pts=(b.remarks||'').split('\n').map(s=>s.trim()).filter(Boolean);
+    if(!b.district||!b.category||!b.month||!b.year)fail('Missing fields');
+    if(pts.length<3)fail('State at least 3 action points (one per line)');
+    const ex=b.clientId&&d.records.find(x=>x.clientId===b.clientId);if(ex)return{ok:true};
+    d.records.push({id:uid(),clientId:b.clientId,userId:me.id,userName:me.name,username:me.username,district:b.district,chiefdom:b.chiefdom||'',
+      category:b.category,month:b.month,year:b.year,remarks:b.remarks,stockout:b.stockout||'',photo:b.photoData||'',createdAt:new Date().toISOString()});
+    putDB(d);return{ok:true};}
+  if(p==='/records'){
+    return d.records.filter(r=>(adm||r.userId===me.id)&&(!q.get('district')||r.district===q.get('district'))&&(!q.get('category')||r.category===q.get('category'))&&(!q.get('chiefdom')||r.chiefdom===q.get('chiefdom')))
+      .sort((a,b)=>b.createdAt.localeCompare(a.createdAt));}
+  if(!adm)fail('Admins only',403);
+  if(p==='/users'&&method==='GET')return d.users.filter(u=>!q.get('district')||u.district===q.get('district')).map(pubU);
+  if(p==='/users'&&method==='POST'){
+    if(!b.name||!b.username||!b.password)fail('Name, username and password required');
+    if(b.role==='admin'&&me.role!=='chief_admin')fail('Only chief_admin can add admins',403);
+    if(dupe(b.username))fail('Username taken',409);
+    const u={id:uid(),name:b.name,username:b.username,password:await H(b.password),role:b.role==='admin'?'admin':'user',district:b.district||'All',createdAt:new Date().toISOString()};
+    d.users.push(u);putDB(d);return pubU(u);}
+  if(p==='/phu-accounts'&&method==='POST'){
+    if(!b.phu||!b.district)fail('PHU name and district required');
+    const base='phu_'+b.phu.toLowerCase().replace(/[^a-z0-9]+/g,'').slice(0,12);let un=base,n=1;while(dupe(un))un=base+(++n);
+    const a=new Uint32Array(3);crypto.getRandomValues(a);
+    const pw=a[0].toString(36).slice(0,4).toUpperCase()+a[1].toString(36).slice(0,4)+'#'+(10+a[2]%90);
+    d.users.push({id:uid(),name:b.phu,username:un,password:await H(pw),role:'user',district:b.district,chiefdom:b.chiefdom||'',phu:true,createdAt:new Date().toISOString()});
+    putDB(d);return{username:un,password:pw,phu:b.phu,district:b.district,chiefdom:b.chiefdom};}
+  if(p.startsWith('/users/')&&method==='DELETE'){
+    const t=d.users.find(u=>u.id===p.split('/')[2]);if(!t)fail('Not found',404);
+    if(t.role!=='user'&&me.role!=='chief_admin')fail('Only chief_admin can remove admins',403);
+    if(t.id===me.id)fail('Cannot delete yourself');
+    d.users=d.users.filter(u=>u.id!==t.id);putDB(d);return{ok:true};}
+  fail('Not found',404);
+  }catch(e){if(e.status===401&&S.token)logout();throw e;}
+}
+function setSession(d){S.token=d.token;S.user=d.user;localStorage.token=d.token;localStorage.user=JSON.stringify(d.user);}
+function logout(){S.token='';S.user=null;localStorage.removeItem('token');localStorage.removeItem('user');render();}
+function note(m,err){S.msg=`<div class="msg ${err?'err':''}">${esc(m)}</div>`;}
+
+/* ---------- NAV ---------- */
+function nav(){
+  const n=$('#nav'); if(!S.user){n.innerHTML='';$('#who').textContent='';return;}
+  $('#who').innerHTML=`${esc(S.user.name)} (${S.user.role}) <button class="btn alt" style="margin:0;padding:6px 10px" onclick="logout()">Logout</button>`;
+  const dm=DISTRICTS.map(d=> d==='Pujehun'
+    ?`<div><div onclick="event.stopPropagation();togglePj()">Pujehun ▾</div><div id="pjl" style="display:none;background:#f3f9f5"><div onclick="pick('Pujehun','')"><b>All of Pujehun</b></div>${CHIEFDOMS.map(c=>`<div style="padding-left:30px" onclick="pick('Pujehun','${c}')">${c}</div>`).join('')}</div></div>`
+    :`<div onclick="pick('${d}','')">${d}</div>`).join('');
+  n.innerHTML=`<button onclick="S.loc=null;S.view='';render()">Home</button>
+   <div class="dd"><button>Districts ▾</button><div class="menu">${dm}</div></div>
+   ${isAdmin()?'<button onclick="S.loc=null;S.view=\'admin\';render()">Admin Dashboard</button>':''}
+   <button onclick="S.loc=null;S.view=\'pw\';S.msg=\'\';render()">Password</button>
+   <button onclick="sync(true)">⟳ Sync (<span id="pc">${queue().length}</span>)</button>`;
+  n.querySelectorAll('.dd>button').forEach(b=>b.onclick=e=>{e.stopPropagation();b.parentElement.classList.toggle('open')});
+}
+function togglePj(){const e=$('#pjl');e.style.display=e.style.display==='none'?'block':'none'}
+function pick(d,c){S.loc={district:d,chiefdom:c};S.view='';S.cat=CATS[0];S.msg='';document.querySelectorAll('.open').forEach(x=>x.classList.remove('open'));render();}
+document.addEventListener('click',()=>document.querySelectorAll('.dd.open').forEach(x=>x.classList.remove('open')));
+
+/* ---------- AUTH ---------- */
+function authView(){
+  app.innerHTML=`<div class="card" style="max-width:420px;margin:auto"><h2>Login</h2>
+  <label>Username</label><input id="lu"><label>Password</label><input id="lp" type="password">
+  <button class="btn" onclick="login()">Login</button>${S.msg}
+  <p class="small">No self-registration. Login details are created by an administrator.</p></div>`;
+}
+async function login(){try{setSession(await api('/login','POST',{username:$('#lu').value,password:$('#lp').value}));S.msg='';render();sync();}catch(e){note(e.message,1);authView();}}
+
+/* ---------- TRACKER ---------- */
+function trackerView(){
+  const {district,chiefdom}=S.loc, y=new Date().getFullYear(), cleaning=S.cat==='End of Month Cleaning';
+  app.innerHTML=`<div class="card"><h2>${esc(district)}${chiefdom?' – '+esc(chiefdom):''}</h2>
+  <div class="tabs">${CATS.map(c=>`<button class="${c===S.cat?'on':''}" onclick="S.cat='${c}';S.msg='';render()">${c}</button>`).join('')}</div>
+  <div class="row"><div><label>Month</label><select id="fm">${MONTHS.map(m=>`<option>${m}</option>`).join('')}</select></div>
+  <div><label>Year</label><select id="fy">${[y-2,y-1,y,y+1].map(v=>`<option ${v===y?'selected':''}>${v}</option>`).join('')}</select></div></div>
+  <label>Remarks / Comments – state at least 3 action points (one per line)</label>
+  <textarea id="fr" rows="5" placeholder="1. ...&#10;2. ...&#10;3. ..."></textarea>
+  ${cleaning?`<label>Drugs stocked out continuously for at least a week (list drugs and duration)</label><textarea id="fs" rows="3"></textarea>`:''}
+  <label>Add photo</label><input id="fp" type="file" accept="image/*">
+  <button class="btn" onclick="saveRec()">Save</button>${S.msg}</div>
+  <div class="card"><h3>Saved ${esc(S.cat)} records</h3><div id="list">Loading…</div></div>`;
+  loadList();
+}
+const toData=f=>new Promise(r=>{if(!f)return r('');const im=new Image,fr=new FileReader;fr.onload=()=>{im.onload=()=>{const k=Math.min(1,1000/im.width),c=document.createElement('canvas');c.width=im.width*k;c.height=im.height*k;c.getContext('2d').drawImage(im,0,0,c.width,c.height);r(c.toDataURL('image/jpeg',.7))};im.src=fr.result};fr.readAsDataURL(f)});
+async function saveRec(){
+  const pts=$('#fr').value.split('\n').map(s=>s.trim()).filter(Boolean);
+  if(pts.length<3){note('Please state at least 3 action points (one per line).',1);return trackerView();}
+  const rec={clientId:crypto.randomUUID?crypto.randomUUID():Date.now()+Math.random()+'',district:S.loc.district,chiefdom:S.loc.chiefdom,category:S.cat,
+    month:$('#fm').value,year:$('#fy').value,remarks:$('#fr').value,stockout:$('#fs')?$('#fs').value:'',photoData:await toData($('#fp').files[0])};
+  setQueue([...queue(),rec]); await sync(); note('Saved. Unsynced records upload automatically when you are online.'); trackerView();
+}
+async function loadList(){
+  const el=$('#list'); const pending=queue().filter(r=>r.district===S.loc.district&&r.chiefdom===S.loc.chiefdom&&r.category===S.cat);
+  let rows=[]; try{rows=await api(`/records?district=${encodeURIComponent(S.loc.district)}&category=${encodeURIComponent(S.cat)}&chiefdom=${encodeURIComponent(S.loc.chiefdom)}`);}catch{}
+  el.innerHTML=recTable([...pending.map(p=>({...p,pending:1})),...rows],isAdmin());
+}
+function recTable(rows,showUser){
+  if(!rows.length)return '<p class="small">No records yet.</p>';
+  return `<table><tr><th>Period</th>${showUser?'<th>By</th><th>Location</th><th>Type</th>':''}<th>Remarks</th></tr>${rows.map(r=>`<tr><td>${r.month} ${r.year}${r.pending?'<br><span class="badge">not synced</span>':''}</td>
+  ${showUser?`<td>${esc(r.userName||'')}</td><td>${esc(r.district)}${r.chiefdom?'<br>'+esc(r.chiefdom):''}</td><td>${esc(r.category)}</td>`:''}
+  <td><pre>${esc(r.remarks)}</pre>${r.stockout?`<b>Stock-out ≥1 week:</b><pre>${esc(r.stockout)}</pre>`:''}${(r.photo||r.photoData)?`<img class="th" src="${r.photo||r.photoData}">`:''}</td></tr>`).join('')}</table>`;
+}
+async function sync(manual){
+  if(!S.token)return; const q=queue(), left=[];
+  for(const r of q){try{await api('/records','POST',r);}catch(e){left.push(r);}}
+  setQueue(left); const pc=$('#pc'); if(pc)pc.textContent=left.length;
+  if(manual){alert(left.length?`${left.length} record(s) still waiting (offline or invalid).`:'All data synced.');if(S.loc)trackerView();}
+}
+window.addEventListener('online',()=>sync());
+
+/* ---------- ADMIN ---------- */
+function adminView(){
+  const tabs=[['users','Users'],['records','All Records'],['add',S.user.role==='chief_admin'?'Create Login (Admin / User)':'Create Login (User)'],['phu','Generate PHU Login']];
+  app.innerHTML=`<div class="card"><h2>Admin Dashboard</h2><div class="tabs">${tabs.map(([k,l])=>`<button class="${S.adminTab===k?'on':''}" onclick="S.adminTab='${k}';S.msg='';render()">${l}</button>`).join('')}</div><div id="ab"></div></div>`;
+  const dsel=(id,all)=>`<select id="${id}">${all?'<option value="">All districts</option>':''}${DISTRICTS.map(d=>`<option>${d}</option>`).join('')}</select>`, b=$('#ab');
+  if(S.adminTab==='users'){
+    b.innerHTML=`<label>Filter by district</label>${dsel('fd',1)}<div id="ul"></div>`; $('#fd').onchange=loadUsers; loadUsers();
+  } else if(S.adminTab==='records'){
+    b.innerHTML=`<div class="row"><div><label>District</label>${dsel('rd2',1)}</div><div><label>Type</label><select id="rc"><option value="">All</option>${CATS.map(c=>`<option>${c}</option>`).join('')}</select></div></div><div id="rl"></div>`;
+    const go=async()=>{$('#rl').innerHTML=recTable(await api(`/records?district=${encodeURIComponent($('#rd2').value)}&category=${encodeURIComponent($('#rc').value)}`),1)};
+    $('#rd2').onchange=$('#rc').onchange=go; go();
+  } else if(S.adminTab==='add'){
+    b.innerHTML=`<label>Full name</label><input id="an"><label>Username</label><input id="au"><label>Password</label><input id="ap">
+    <label>District</label>${dsel('ad')}${S.user.role==='chief_admin'?`<label>Role</label><select id="ar"><option value="user">User</option><option value="admin">Admin</option></select>`:''}
+    <button class="btn" onclick="addUser()">Create</button>${S.msg}`;
+  } else {
+    b.innerHTML=`<label>PHU name</label><input id="pn"><label>District</label>${dsel('pd')}
+    <label>Chiefdom (optional)</label><input id="pc2"><button class="btn" onclick="genPhu()">Generate login</button>${S.msg}`;
+  }
+}
+async function loadUsers(){
+  const u=await api('/users?district='+encodeURIComponent($('#fd').value));
+  $('#ul').innerHTML=`<table><tr><th>Name</th><th>Username</th><th>Role</th><th>District</th><th></th></tr>${u.map(x=>`<tr><td>${esc(x.name)}</td><td>${esc(x.username)}</td><td>${x.role}${x.phu?' (PHU)':''}</td><td>${esc(x.district)}</td>
+  <td>${x.id!==S.user.id&&(x.role==='user'||S.user.role==='chief_admin')?`<button class="btn red" style="margin:0;padding:4px 10px" onclick="delUser('${x.id}')">Remove</button>`:''}</td></tr>`).join('')}</table>`;
+}
+async function delUser(id){if(confirm('Remove this account?')){try{await api('/users/'+id,'DELETE');loadUsers();}catch(e){alert(e.message);}}}
+async function addUser(){try{const u=await api('/users','POST',{name:$('#an').value,username:$('#au').value,password:$('#ap').value,district:$('#ad').value,role:$('#ar')?$('#ar').value:'user'});note('Created '+u.role+': '+u.username);}catch(e){note(e.message,1);}adminView();}
+async function genPhu(){try{const r=await api('/phu-accounts','POST',{phu:$('#pn').value,district:$('#pd').value,chiefdom:$('#pc2').value});
+  S.msg=`<div class="msg"><b>PHU login created – copy now, the password is not shown again.</b><br>PHU: ${esc(r.phu)}<br>Username: <b>${esc(r.username)}</b><br>Password: <b>${esc(r.password)}</b></div>`;}catch(e){note(e.message,1);}adminView();}
+
+function pwView(){app.innerHTML=`<div class="card" style="max-width:420px"><h2>Change password</h2><label>Current password</label><input id="op" type="password"><label>New password (6+ characters)</label><input id="np" type="password"><button class="btn" onclick="chgPw()">Update</button>${S.msg}</div>`}
+async function chgPw(){try{await api('/password','POST',{oldPassword:$('#op').value,newPassword:$('#np').value});note('Password updated.')}catch(e){note(e.message,1)}pwView()}
+function render(){
+  nav();
+  if(!S.user)return authView();
+  if(S.view==='pw'&&!S.loc)return pwView();
+  if(S.loc)return trackerView();
+  if(S.view==='admin'&&isAdmin())return adminView();
+  app.innerHTML=`<div class="card"><h2>Welcome, ${esc(S.user.name)}</h2><p>Use the <b>Districts</b> menu to choose your district${isAdmin()?', or open the <b>Admin Dashboard</b>':''}. Everything is saved in this browser on this device.</p></div>`;
+}
+render(); sync();
+</script>
+</body>
+</html>
